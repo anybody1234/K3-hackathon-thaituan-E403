@@ -72,11 +72,13 @@ async def flush_pending_digests(
     db: Database,
     digest_channel: discord.TextChannel,
     guild: discord.Guild,
+    limit: int = 0,
 ) -> int:
     """
     Bước 2 — Flush batch: lấy bài chưa đăng, xử lý AI, đăng digest.
 
-    Chỉ xử lý bài trong vòng DIGEST_INTERVAL_HOURS giờ gần nhất.
+    limit=0: xử lý tất cả (dùng cho batch tự động)
+    limit=N: chỉ xử lý N bài mới nhất (dùng cho /flush thủ công)
     Trả về số bài đã đăng.
     """
     # Lấy bài chưa đăng digest (digest_msg_id IS NULL, summary IS NULL)
@@ -111,6 +113,10 @@ async def flush_pending_digests(
         log.info("Khong co bai moi trong %dh qua", config.DIGEST_INTERVAL_HOURS)
         return 0
 
+    # Giới hạn số bài nếu có limit
+    if limit > 0:
+        valid_posts = valid_posts[-limit:]  # Lấy N bài mới nhất
+
     # Header message cho batch
     count = len(valid_posts)
     header = await digest_channel.send(
@@ -123,8 +129,8 @@ async def flush_pending_digests(
         try:
             # Delay giữa các bài để tránh rate limit (trừ bài đầu)
             if i > 0:
-                log.info("Cho 10s truoc bai tiep theo (tranh rate limit)...")
-                await asyncio.sleep(10)
+                log.info("Cho 15s truoc bai tiep theo (tranh rate limit)...")
+                await asyncio.sleep(15)
 
             content_for_ai = post.get("fetched_content") or post.get("content") or ""
             author_name = post.get("author_name", "")

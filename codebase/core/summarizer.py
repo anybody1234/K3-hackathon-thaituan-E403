@@ -51,7 +51,8 @@ async def summarize_and_tag(content: str, author_name: str = "") -> dict:
     """
     Tóm tắt nội dung + gắn tag.
 
-    Retry thông minh: 2 vòng qua tất cả model, exponential backoff khi bị 429.
+    Chiến lược đơn giản: thử từng model, nếu bị 429 chờ đủ 60s rồi thử lại.
+    Tối đa 5 lần gọi API để tiết kiệm quota.
     """
     if not content or len(content.strip()) < 10:
         return {
@@ -59,62 +60,57 @@ async def summarize_and_tag(content: str, author_name: str = "") -> dict:
             "tags": ["Khác"],
         }
 
-    user_prompt = f"Người đăng: {author_name}\n\nNội dung bài:\n{content[:5000]}"
+    user_prompt = f"Người đăng: {author_name}\n\nNội dung bài:\n{content[:3000]}"
 
-    # 2 vòng — nếu vòng 1 tất cả bị 429, chờ lâu rồi thử lại vòng 2
-    for round_num in range(2):
-        if round_num > 0:
-            wait_time = 30
-            log.info("Tat ca model bi rate limit, cho %ds roi thu lai (vong %d)...", wait_time, round_num + 1)
-            await asyncio.sleep(wait_time)
+    max_attempts = 5
+    for attempt in range(max_attempts):
+        # Chọn model: xoay vòng qua danh sách
+        model_name = _FALLBACK_MODELS[attempt % len(_FALLBACK_MODELS)]
 
-        for model_name in _FALLBACK_MODELS:
-            for attempt in range(3):
-                try:
-                    # Rate limiting — delay trước mỗi lần gọi
-                    await asyncio.sleep(config.API_CALL_DELAY)
+        try:
+            # Delay trước mỗi lần gọi
+            if attempt > 0:
+                await asyncio.sleep(config.API_CALL_DELAY)
 
-                    response = await asyncio.to_thread(
-                        _client.models.generate_content,
-                        model=model_name,
-                        contents=user_prompt,
-                        config=types.GenerateContentConfig(
-                            system_instruction=_SYSTEM_PROMPT,
-                            temperature=0.3,
-                            max_output_tokens=200,
-                        ),
-                    )
+            log.info("Goi %s (lan %d/%d)...", model_name, attempt + 1, max_attempts)
 
-                    if not response.text:
-                        log.warning("Gemini tra ve rong (%s, attempt %d)", model_name, attempt + 1)
-                        continue
+            response = await asyncio.to_thread(
+                _client.models.generate_content,
+                model=model_name,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=_SYSTEM_PROMPT,
+                    temperature=0.3,
+                    max_output_tokens=200,
+                ),
+            )
 
-                    result = _parse_response(response.text)
-                    if result:
-                        log.info("Summarize OK voi model %s", model_name)
-                        return result
+            if not response.text:
+                log.warning("Gemini tra ve rong (%s)", model_name)
+                continue
 
-                except Exception as e:
-                    error_str = str(e)
-                    if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                        # Exponential backoff: 15s, 30s, 60s
-                        backoff = 15 * (2 ** attempt)
-                        log.warning("Model %s bi rate limit (attempt %d), cho %ds...",
-                                    model_name, attempt + 1, backoff)
-                        await asyncio.sleep(backoff)
-                        if attempt >= 1:
-                            break  # Chuyển sang model tiếp sau 2 lần thử
-                    elif "503" in error_str or "UNAVAILABLE" in error_str:
-                        log.warning("Model %s dang qua tai, doi 15s...", model_name)
-                        await asyncio.sleep(15)
-                        continue
-                    else:
-                        log.error("Loi Gemini (%s, attempt %d): %s", model_name, attempt + 1, e)
-                        if attempt < 2:
-                            await asyncio.sleep(3 * (attempt + 1))
+            result = _parse_response(response.text)
+            if result:
+                log.info("Summarize OK voi %s (lan %d)", model_name, attempt + 1)
+                return result
+            else:
+                log.warning("Khong parse duoc response tu %s", model_name)
 
-    # Fallback khi tất cả model fail sau 2 vòng
-    log.error("TAT CA model Gemini fail sau 2 vong, dung fallback")
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                wait = 60  # Chờ đủ 1 phút cho rate limit reset
+                log.warning("Model %s bi rate limit, cho %ds...", model_name, wait)
+                await asyncio.sleep(wait)
+            elif "503" in error_str or "UNAVAILABLE" in error_str:
+                log.warning("Model %s qua tai, cho 20s...", model_name)
+                await asyncio.sleep(20)
+            else:
+                log.error("Loi Gemini (%s): %s", model_name, e)
+                await asyncio.sleep(5)
+
+    # Fallback
+    log.error("Gemini fail sau %d lan thu, dung fallback", max_attempts)
     return {
         "summary": _smart_fallback(content),
         "tags": ["Khác"],

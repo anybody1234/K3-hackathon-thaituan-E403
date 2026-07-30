@@ -146,10 +146,10 @@ async def on_ready():
     setup_ask_command(bot.tree, db)
     setup_foryou_command(bot.tree, db)
 
-    # /flush — admin flush thủ công
+    # /flush — admin flush thủ công (chỉ 1 bài mới nhất cho nhanh)
     @bot.tree.command(
         name="flush",
-        description="[Admin] Đăng ngay batch digest (không chờ chu kỳ)",
+        description="[Admin] Đăng ngay 1 bài digest mới nhất (không chờ chu kỳ)",
     )
     async def flush_command(interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -160,6 +160,7 @@ async def on_ready():
             db=db,
             digest_channel=_digest_channel,
             guild=interaction.guild,
+            limit=1,  # Chỉ 1 bài cho nhanh
         )
         await interaction.followup.send(
             f"Da xu ly va dang {count} bai moi.", ephemeral=True
