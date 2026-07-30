@@ -46,72 +46,47 @@ async def _get_user_reactions_for_post(user_id: str, post_id: int) -> set[str]:
 def _build_updated_view(existing_reactions: set[str], new_reaction: str) -> View:
     """
     Tạo view mới dựa trên trạng thái reactions hiện tại.
-
-    Rules:
-      - Hay + Lưu tương thích → cả 2 có thể cùng active
-      - Bỏ qua → loại trừ tất cả
-      - Khi đã có cả Hay + Lưu → disable hết
     """
     all_reactions = existing_reactions | {new_reaction}
 
-    # Nếu bấm "Bỏ qua" → disable tất cả
-    if "skip" in all_reactions:
-        view = View(timeout=None)
-        for label, emoji, style, action in [
-            ("Hay", "👍", discord.ButtonStyle.secondary, "like"),
-            ("Lưu", "📌", discord.ButtonStyle.secondary, "save"),
-            ("Bỏ qua", "⏭️", discord.ButtonStyle.secondary, "skip"),
-        ]:
-            btn_label = f"✓ {label}" if action in all_reactions else label
-            btn_style = style
-            if action == "skip" and action in all_reactions:
-                btn_style = discord.ButtonStyle.danger
-            view.add_item(Button(
-                label=btn_label, emoji=emoji, style=btn_style,
-                disabled=True, custom_id=f"done:{action}",
-            ))
-        return view
+    # BẮT BUỘC dùng PersistentFeedbackView để giữ lại các callbacks (nếu ko click lần 2 sẽ bị lỗi không phản hồi)
+    view = PersistentFeedbackView()
 
-    # Nếu đã có cả Hay + Lưu → disable tất cả
-    if "like" in all_reactions and "save" in all_reactions:
-        view = View(timeout=None)
-        for label, emoji, style, action in [
-            ("Hay", "👍", discord.ButtonStyle.success, "like"),
-            ("Lưu", "📌", discord.ButtonStyle.primary, "save"),
-            ("Bỏ qua", "⏭️", discord.ButtonStyle.secondary, "skip"),
-        ]:
-            btn_label = f"✓ {label}" if action in all_reactions else label
-            view.add_item(Button(
-                label=btn_label, emoji=emoji, style=style,
-                disabled=True, custom_id=f"done:{action}",
-            ))
-        return view
+    for child in view.children:
+        if not isinstance(child, Button):
+            continue
+        
+        # custom_id ban đầu là feedback:like, feedback:save, feedback:skip
+        action = child.custom_id.replace("feedback:", "")
 
-    # Chỉ có Hay hoặc chỉ có Lưu → disable Bỏ qua, cho phép bấm nút còn lại
-    view = View(timeout=None)
-    for label, emoji, style, action, cid in [
-        ("Hay", "👍", discord.ButtonStyle.success, "like", "feedback:like"),
-        ("Lưu", "📌", discord.ButtonStyle.primary, "save", "feedback:save"),
-        ("Bỏ qua", "⏭️", discord.ButtonStyle.secondary, "skip", "feedback:skip"),
-    ]:
+        # Nếu bấm "Bỏ qua" → disable tất cả
+        if "skip" in all_reactions:
+            if action in all_reactions:
+                child.label = f"✓ {child.label}"
+                child.style = discord.ButtonStyle.danger
+            child.disabled = True
+            child.custom_id = f"done:{action}"
+            continue
+
+        # Nếu đã có cả Hay + Lưu → disable tất cả
+        if "like" in all_reactions and "save" in all_reactions:
+            if action in all_reactions:
+                child.label = f"✓ {child.label}"
+            child.disabled = True
+            child.custom_id = f"done:{action}"
+            continue
+
+        # Chỉ có Hay hoặc chỉ có Lưu
         if action in all_reactions:
-            # Nút đã bấm → disable + checkmark
-            view.add_item(Button(
-                label=f"✓ {label}", emoji=emoji, style=style,
-                disabled=True, custom_id=f"done:{action}",
-            ))
+            child.label = f"✓ {child.label}"
+            child.disabled = True
+            child.custom_id = f"done:{action}"
         elif action == "skip":
-            # Bỏ qua → disable (không tương thích với Hay/Lưu)
-            view.add_item(Button(
-                label=label, emoji=emoji, style=style,
-                disabled=True, custom_id=f"done:{action}",
-            ))
+            child.disabled = True
+            child.custom_id = f"done:{action}"
         else:
-            # Nút chưa bấm + tương thích → vẫn enabled
-            view.add_item(Button(
-                label=label, emoji=emoji, style=style,
-                disabled=False, custom_id=cid,
-            ))
+            # Nút tương thích chưa bấm → giữ nguyên
+            child.disabled = False
 
     return view
 
@@ -126,12 +101,15 @@ async def _handle_reaction(
         )
         return
 
+    # Tránh timeout bằng cách defer ngay lập tức
+    await interaction.response.defer(ephemeral=True)
+
     user_id = str(interaction.user.id)
 
     try:
         post_id = _extract_post_id(interaction.message)
         if post_id is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Khong xac dinh duoc bai viet.", ephemeral=True
             )
             return
@@ -141,14 +119,20 @@ async def _handle_reaction(
 
         # Kiểm tra logic tương thích
         if reaction_type == "skip" and ("like" in existing or "save" in existing):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Bạn đã đánh giá bài này rồi, không thể bỏ qua.", ephemeral=True
             )
             return
 
         if reaction_type in ("like", "save") and "skip" in existing:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Bạn đã bỏ qua bài này rồi.", ephemeral=True
+            )
+            return
+
+        if reaction_type in existing:
+            await interaction.followup.send(
+                "Bạn đã thực hiện hành động này rồi.", ephemeral=True
             )
             return
 
@@ -178,7 +162,7 @@ async def _handle_reaction(
             "save": "📌 Đã lưu — sẽ ưu tiên nội dung tương tự cho bạn.",
             "skip": "⏭️ Đã bỏ qua — sẽ giảm nội dung tương tự.",
         }
-        await interaction.response.send_message(
+        await interaction.followup.send(
             messages[reaction_type], ephemeral=True
         )
         log.info(
@@ -186,15 +170,13 @@ async def _handle_reaction(
             reaction_type, user_id, post_id, new_existing,
         )
 
-    except discord.errors.InteractionResponded:
-        pass
     except Exception as e:
         log.error("Loi xu ly reaction: %s", e)
         try:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Co loi xay ra, thu lai sau.", ephemeral=True
             )
-        except discord.errors.InteractionResponded:
+        except Exception:
             pass
 
 

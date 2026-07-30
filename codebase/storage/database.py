@@ -218,8 +218,8 @@ class Database:
 
     async def get_user_reactions(self, user_id: str) -> list[dict]:
         async with self._conn.execute(
-            """SELECT r.*, p.tags FROM reactions r
-               JOIN posts p ON r.post_id = p.id
+            """SELECT r.*, COALESCE(p.tags, '[]') as tags FROM reactions r
+               LEFT JOIN posts p ON r.post_id = p.id
                WHERE r.user_id = ?
                ORDER BY r.created_at DESC""",
             (user_id,),
