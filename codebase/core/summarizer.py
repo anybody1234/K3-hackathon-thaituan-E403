@@ -18,11 +18,11 @@ log = logging.getLogger(__name__)
 # Khởi tạo client
 _client = genai.Client(api_key=config.GOOGLE_API_KEY)
 
-# Danh sách model fallback — thử lần lượt nếu model chính hết quota
+# Model ưu tiên — gemini-2.5-flash hoạt động tốt nhất, đặt đầu tiên
 _FALLBACK_MODELS = [
+    "gemini-2.5-flash",
     config.GEMINI_MODEL,       # gemini-2.0-flash
     "gemini-2.0-flash-lite",
-    "gemini-2.5-flash",
 ]
 
 # ── Prompt ───────────────────────────────────────────────
@@ -51,8 +51,7 @@ async def summarize_and_tag(content: str, author_name: str = "") -> dict:
     """
     Tóm tắt nội dung + gắn tag.
 
-    Chiến lược đơn giản: thử từng model, nếu bị 429 chờ đủ 60s rồi thử lại.
-    Tối đa 5 lần gọi API để tiết kiệm quota.
+    Chiến lược: thử model tốt nhất trước (gemini-2.5-flash), tối đa 3 lần.
     """
     if not content or len(content.strip()) < 10:
         return {
@@ -62,13 +61,11 @@ async def summarize_and_tag(content: str, author_name: str = "") -> dict:
 
     user_prompt = f"Người đăng: {author_name}\n\nNội dung bài:\n{content[:3000]}"
 
-    max_attempts = 5
+    max_attempts = 3
     for attempt in range(max_attempts):
-        # Chọn model: xoay vòng qua danh sách
         model_name = _FALLBACK_MODELS[attempt % len(_FALLBACK_MODELS)]
 
         try:
-            # Delay trước mỗi lần gọi
             if attempt > 0:
                 await asyncio.sleep(config.API_CALL_DELAY)
 
@@ -81,7 +78,7 @@ async def summarize_and_tag(content: str, author_name: str = "") -> dict:
                 config=types.GenerateContentConfig(
                     system_instruction=_SYSTEM_PROMPT,
                     temperature=0.3,
-                    max_output_tokens=200,
+                    max_output_tokens=400,
                 ),
             )
 
@@ -90,24 +87,26 @@ async def summarize_and_tag(content: str, author_name: str = "") -> dict:
                 continue
 
             result = _parse_response(response.text)
-            if result:
-                log.info("Summarize OK voi %s (lan %d)", model_name, attempt + 1)
+            if result and len(result["summary"]) > 15:
+                # Chỉ chấp nhận summary đủ dài (tránh kết quả rác)
+                log.info("Summarize OK voi %s (lan %d): %s", model_name, attempt + 1, result["summary"][:60])
                 return result
             else:
-                log.warning("Khong parse duoc response tu %s", model_name)
+                log.warning("Summary qua ngan hoac parse fail tu %s: %s",
+                           model_name, result.get("summary", "") if result else "None")
 
         except Exception as e:
             error_str = str(e)
             if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                wait = 60  # Chờ đủ 1 phút cho rate limit reset
+                wait = 30  # Chờ đủ 30s cho rate limit reset
                 log.warning("Model %s bi rate limit, cho %ds...", model_name, wait)
                 await asyncio.sleep(wait)
             elif "503" in error_str or "UNAVAILABLE" in error_str:
-                log.warning("Model %s qua tai, cho 20s...", model_name)
-                await asyncio.sleep(20)
+                log.warning("Model %s qua tai, cho 10s...", model_name)
+                await asyncio.sleep(10)
             else:
                 log.error("Loi Gemini (%s): %s", model_name, e)
-                await asyncio.sleep(5)
+                await asyncio.sleep(3)
 
     # Fallback
     log.error("Gemini fail sau %d lan thu, dung fallback", max_attempts)
