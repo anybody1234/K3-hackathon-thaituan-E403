@@ -1,0 +1,18 @@
+# Discord bot
+discord.py>=2.3.0
+
+# Google Gemini (new SDK)
+google-genai>=1.0.0
+
+# Async HTTP + HTML parsing (fetch link content)
+httpx>=0.27.0
+beautifulsoup4>=4.12.0
+
+# Embedding math
+numpy>=1.26.0
+
+# Async SQLite
+aiosqlite>=0.20.0
+
+# Env vars
+python-dotenv>=1.0.0
