@@ -1,13 +1,10 @@
 """
 Feedback buttons — thu phản hồi người dùng trên digest cards.
 
-Persistent view (sống qua restart) với 3 nút:
-  👍 Hay  |  📌 Lưu  |  ⏭️ Bỏ qua
-
-Mỗi lần bấm:
-  - Ghi vào DB + cập nhật hồ sơ sở thích
-  - DISABLE tất cả nút + highlight nút đã chọn
-  - Trả ephemeral thông báo
+Logic nút:
+  - Hay + Lưu: tương thích, bấm cả 2 được
+  - Bỏ qua: loại trừ tất cả, bấm xong disable hết
+  - Sau khi bấm cả Hay + Lưu → disable hết
 """
 import json
 import logging
@@ -17,18 +14,15 @@ from discord.ui import View, Button, button
 
 log = logging.getLogger(__name__)
 
-# Reference tới database sẽ được set từ bot.py
 _db = None
 
 
 def set_database(db):
-    """Inject database reference. Gọi một lần từ bot.py."""
     global _db
     _db = db
 
 
 def _extract_post_id(message: discord.Message) -> int | None:
-    """Lấy post_id từ footer text của embed: 'ID: 42 • ...'"""
     if not message.embeds:
         return None
     footer = message.embeds[0].footer
@@ -41,10 +35,91 @@ def _extract_post_id(message: discord.Message) -> int | None:
     return None
 
 
+async def _get_user_reactions_for_post(user_id: str, post_id: int) -> set[str]:
+    """Lấy set reaction types mà user đã bấm cho post này."""
+    if _db is None:
+        return set()
+    reactions = await _db.get_user_reactions(user_id)
+    return {r["reaction_type"] for r in reactions if r["post_id"] == post_id}
+
+
+def _build_updated_view(existing_reactions: set[str], new_reaction: str) -> View:
+    """
+    Tạo view mới dựa trên trạng thái reactions hiện tại.
+
+    Rules:
+      - Hay + Lưu tương thích → cả 2 có thể cùng active
+      - Bỏ qua → loại trừ tất cả
+      - Khi đã có cả Hay + Lưu → disable hết
+    """
+    all_reactions = existing_reactions | {new_reaction}
+
+    # Nếu bấm "Bỏ qua" → disable tất cả
+    if "skip" in all_reactions:
+        view = View(timeout=None)
+        for label, emoji, style, action in [
+            ("Hay", "👍", discord.ButtonStyle.secondary, "like"),
+            ("Lưu", "📌", discord.ButtonStyle.secondary, "save"),
+            ("Bỏ qua", "⏭️", discord.ButtonStyle.secondary, "skip"),
+        ]:
+            btn_label = f"✓ {label}" if action in all_reactions else label
+            btn_style = style
+            if action == "skip" and action in all_reactions:
+                btn_style = discord.ButtonStyle.danger
+            view.add_item(Button(
+                label=btn_label, emoji=emoji, style=btn_style,
+                disabled=True, custom_id=f"done:{action}",
+            ))
+        return view
+
+    # Nếu đã có cả Hay + Lưu → disable tất cả
+    if "like" in all_reactions and "save" in all_reactions:
+        view = View(timeout=None)
+        for label, emoji, style, action in [
+            ("Hay", "👍", discord.ButtonStyle.success, "like"),
+            ("Lưu", "📌", discord.ButtonStyle.primary, "save"),
+            ("Bỏ qua", "⏭️", discord.ButtonStyle.secondary, "skip"),
+        ]:
+            btn_label = f"✓ {label}" if action in all_reactions else label
+            view.add_item(Button(
+                label=btn_label, emoji=emoji, style=style,
+                disabled=True, custom_id=f"done:{action}",
+            ))
+        return view
+
+    # Chỉ có Hay hoặc chỉ có Lưu → disable Bỏ qua, cho phép bấm nút còn lại
+    view = View(timeout=None)
+    for label, emoji, style, action, cid in [
+        ("Hay", "👍", discord.ButtonStyle.success, "like", "feedback:like"),
+        ("Lưu", "📌", discord.ButtonStyle.primary, "save", "feedback:save"),
+        ("Bỏ qua", "⏭️", discord.ButtonStyle.secondary, "skip", "feedback:skip"),
+    ]:
+        if action in all_reactions:
+            # Nút đã bấm → disable + checkmark
+            view.add_item(Button(
+                label=f"✓ {label}", emoji=emoji, style=style,
+                disabled=True, custom_id=f"done:{action}",
+            ))
+        elif action == "skip":
+            # Bỏ qua → disable (không tương thích với Hay/Lưu)
+            view.add_item(Button(
+                label=label, emoji=emoji, style=style,
+                disabled=True, custom_id=f"done:{action}",
+            ))
+        else:
+            # Nút chưa bấm + tương thích → vẫn enabled
+            view.add_item(Button(
+                label=label, emoji=emoji, style=style,
+                disabled=False, custom_id=cid,
+            ))
+
+    return view
+
+
 async def _handle_reaction(
     interaction: discord.Interaction, reaction_type: str
 ):
-    """Xử lý chung cho cả 3 nút — disable sau khi bấm."""
+    """Xử lý chung cho cả 3 nút."""
     if _db is None:
         await interaction.response.send_message(
             "Bot dang khoi dong, thu lai sau.", ephemeral=True
@@ -58,6 +133,22 @@ async def _handle_reaction(
         if post_id is None:
             await interaction.response.send_message(
                 "Khong xac dinh duoc bai viet.", ephemeral=True
+            )
+            return
+
+        # Lấy reactions hiện tại của user cho post này
+        existing = await _get_user_reactions_for_post(user_id, post_id)
+
+        # Kiểm tra logic tương thích
+        if reaction_type == "skip" and ("like" in existing or "save" in existing):
+            await interaction.response.send_message(
+                "Bạn đã đánh giá bài này rồi, không thể bỏ qua.", ephemeral=True
+            )
+            return
+
+        if reaction_type in ("like", "save") and "skip" in existing:
+            await interaction.response.send_message(
+                "Bạn đã bỏ qua bài này rồi.", ephemeral=True
             )
             return
 
@@ -76,26 +167,9 @@ async def _handle_reaction(
             for tag in tags:
                 await _db.update_user_profile(user_id, tag, delta)
 
-        # ── Disable tất cả nút + highlight nút đã chọn ──
-        new_view = View(timeout=None)
-        button_configs = [
-            ("Hay", "👍", discord.ButtonStyle.success, "like"),
-            ("Lưu", "📌", discord.ButtonStyle.primary, "save"),
-            ("Bỏ qua", "⏭️", discord.ButtonStyle.secondary, "skip"),
-        ]
-        for label, emoji, style, action in button_configs:
-            btn = Button(
-                label=label,
-                emoji=emoji,
-                style=style if action == reaction_type else discord.ButtonStyle.secondary,
-                disabled=True,
-                custom_id=f"done:{action}:{post_id}",
-            )
-            # Thêm checkmark cho nút đã chọn
-            if action == reaction_type:
-                btn.label = f"✓ {label}"
-            new_view.add_item(btn)
-
+        # Cập nhật buttons trên message
+        new_existing = existing | {reaction_type}
+        new_view = _build_updated_view(existing, reaction_type)
         await interaction.message.edit(view=new_view)
 
         # Phản hồi ephemeral
@@ -108,8 +182,8 @@ async def _handle_reaction(
             messages[reaction_type], ephemeral=True
         )
         log.info(
-            "Reaction %s tu user %s cho post %d",
-            reaction_type, user_id, post_id,
+            "Reaction %s tu user %s cho post %d (total: %s)",
+            reaction_type, user_id, post_id, new_existing,
         )
 
     except discord.errors.InteractionResponded:
@@ -125,74 +199,35 @@ async def _handle_reaction(
 
 
 class FeedbackView(View):
-    """
-    Persistent view gắn dưới mỗi digest embed.
-    Sau khi bấm 1 nút → disable tất cả + highlight nút đã chọn.
-    """
-
     def __init__(self, post_id: int):
         super().__init__(timeout=None)
         self.post_id = post_id
 
-    @button(
-        label="Hay",
-        emoji="👍",
-        style=discord.ButtonStyle.success,
-        custom_id="feedback:like",
-    )
+    @button(label="Hay", emoji="👍", style=discord.ButtonStyle.success, custom_id="feedback:like")
     async def like_button(self, interaction: discord.Interaction, btn: Button):
         await _handle_reaction(interaction, "like")
 
-    @button(
-        label="Lưu",
-        emoji="📌",
-        style=discord.ButtonStyle.primary,
-        custom_id="feedback:save",
-    )
+    @button(label="Lưu", emoji="📌", style=discord.ButtonStyle.primary, custom_id="feedback:save")
     async def save_button(self, interaction: discord.Interaction, btn: Button):
         await _handle_reaction(interaction, "save")
 
-    @button(
-        label="Bỏ qua",
-        emoji="⏭️",
-        style=discord.ButtonStyle.secondary,
-        custom_id="feedback:skip",
-    )
+    @button(label="Bỏ qua", emoji="⏭️", style=discord.ButtonStyle.secondary, custom_id="feedback:skip")
     async def skip_button(self, interaction: discord.Interaction, btn: Button):
         await _handle_reaction(interaction, "skip")
 
 
 class PersistentFeedbackView(View):
-    """
-    View đăng ký lúc startup để xử lý buttons từ tin nhắn cũ.
-    """
-
     def __init__(self):
         super().__init__(timeout=None)
 
-    @button(
-        label="Hay",
-        emoji="👍",
-        style=discord.ButtonStyle.success,
-        custom_id="feedback:like",
-    )
+    @button(label="Hay", emoji="👍", style=discord.ButtonStyle.success, custom_id="feedback:like")
     async def like_button(self, interaction: discord.Interaction, btn: Button):
         await _handle_reaction(interaction, "like")
 
-    @button(
-        label="Lưu",
-        emoji="📌",
-        style=discord.ButtonStyle.primary,
-        custom_id="feedback:save",
-    )
+    @button(label="Lưu", emoji="📌", style=discord.ButtonStyle.primary, custom_id="feedback:save")
     async def save_button(self, interaction: discord.Interaction, btn: Button):
         await _handle_reaction(interaction, "save")
 
-    @button(
-        label="Bỏ qua",
-        emoji="⏭️",
-        style=discord.ButtonStyle.secondary,
-        custom_id="feedback:skip",
-    )
+    @button(label="Bỏ qua", emoji="⏭️", style=discord.ButtonStyle.secondary, custom_id="feedback:skip")
     async def skip_button(self, interaction: discord.Interaction, btn: Button):
         await _handle_reaction(interaction, "skip")
