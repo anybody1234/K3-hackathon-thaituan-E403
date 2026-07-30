@@ -29,18 +29,21 @@ _FALLBACK_MODELS = [
 
 _SYSTEM_PROMPT = f"""\
 Bạn là trợ lý AI cho server Discord cộng đồng học viên công nghệ.
-Nhiệm vụ: TÓM TẮT bài chia sẻ và gắn tag chủ đề.
+Nhiệm vụ: TÓM TẮT NGẮN GỌN bài chia sẻ và gắn tag chủ đề.
 
-QUY TẮC QUAN TRỌNG:
-1. PHẢI TÓM TẮT — KHÔNG copy nguyên văn mấy câu đầu. Hãy đọc toàn bộ nội dung rồi viết lại ý chính bằng cách diễn đạt mới, ngắn gọn.
-2. Tóm tắt trong 2-3 câu bằng tiếng Việt. Nêu ý chính và giá trị/lợi ích của bài.
+QUY TẮC:
+1. PHẢI TÓM TẮT bằng lời mới — KHÔNG copy nguyên văn từ bài gốc.
+2. Tóm tắt trong 2-3 câu NGẮN, tổng tối đa 150 ký tự. Chỉ nêu ý chính cốt lõi.
 3. Gắn 1-3 tag từ danh sách: {', '.join(config.ALLOWED_TAGS)}
-4. Nếu nội dung quá ngắn hoặc không rõ ràng, ghi summary là "Nội dung chưa đủ để tóm tắt" và tag là ["Khác"].
-5. KHÔNG bịa thông tin. Chỉ tóm tắt những gì có trong nội dung.
-6. Trả về ĐÚNG JSON format, không markdown, không giải thích thêm.
+4. Nếu nội dung quá ngắn/không rõ, summary = "Nội dung chưa đủ để tóm tắt", tags = ["Khác"].
+5. KHÔNG bịa thông tin.
+6. Trả về JSON thuần, không markdown.
 
-FORMAT OUTPUT (JSON thuần, không code block):
-{{"summary": "tóm tắt 2-3 câu bằng lời của bạn", "tags": ["tag1", "tag2"]}}
+VÍ DỤ:
+{{"summary": "Chia sẻ 6 nguyên tắc AI có trách nhiệm của Google. Hữu ích cho ai đang xây sản phẩm AI.", "tags": ["AI"]}}
+
+FORMAT:
+{{"summary": "tóm tắt ngắn gọn", "tags": ["tag1"]}}
 """
 
 
@@ -48,7 +51,7 @@ async def summarize_and_tag(content: str, author_name: str = "") -> dict:
     """
     Tóm tắt nội dung + gắn tag.
 
-    Có delay giữa các lần gọi API và fallback qua nhiều model.
+    Retry thông minh: 2 vòng qua tất cả model, exponential backoff khi bị 429.
     """
     if not content or len(content.strip()) < 10:
         return {
@@ -58,51 +61,60 @@ async def summarize_and_tag(content: str, author_name: str = "") -> dict:
 
     user_prompt = f"Người đăng: {author_name}\n\nNội dung bài:\n{content[:5000]}"
 
-    # Thử từng model
-    for model_name in _FALLBACK_MODELS:
-        for attempt in range(3):
-            try:
-                # Rate limiting — delay trước mỗi lần gọi
-                await asyncio.sleep(config.API_CALL_DELAY)
+    # 2 vòng — nếu vòng 1 tất cả bị 429, chờ lâu rồi thử lại vòng 2
+    for round_num in range(2):
+        if round_num > 0:
+            wait_time = 30
+            log.info("Tat ca model bi rate limit, cho %ds roi thu lai (vong %d)...", wait_time, round_num + 1)
+            await asyncio.sleep(wait_time)
 
-                response = await asyncio.to_thread(
-                    _client.models.generate_content,
-                    model=model_name,
-                    contents=user_prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=_SYSTEM_PROMPT,
-                        temperature=0.3,
-                        max_output_tokens=512,
-                    ),
-                )
+        for model_name in _FALLBACK_MODELS:
+            for attempt in range(3):
+                try:
+                    # Rate limiting — delay trước mỗi lần gọi
+                    await asyncio.sleep(config.API_CALL_DELAY)
 
-                if not response.text:
-                    log.warning("Gemini tra ve rong (%s, attempt %d)", model_name, attempt + 1)
-                    continue
+                    response = await asyncio.to_thread(
+                        _client.models.generate_content,
+                        model=model_name,
+                        contents=user_prompt,
+                        config=types.GenerateContentConfig(
+                            system_instruction=_SYSTEM_PROMPT,
+                            temperature=0.3,
+                            max_output_tokens=200,
+                        ),
+                    )
 
-                result = _parse_response(response.text)
-                if result:
-                    log.info("Summarize OK voi model %s", model_name)
-                    return result
+                    if not response.text:
+                        log.warning("Gemini tra ve rong (%s, attempt %d)", model_name, attempt + 1)
+                        continue
 
-            except Exception as e:
-                error_str = str(e)
-                if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                    log.warning("Model %s het quota, thu model tiep theo", model_name)
-                    # Chờ retry delay nếu API trả về
-                    await asyncio.sleep(5)
-                    break  # Chuyển sang model tiếp
-                elif "503" in error_str or "UNAVAILABLE" in error_str:
-                    log.warning("Model %s dang qua tai, doi...", model_name)
-                    await asyncio.sleep(10)
-                    continue
-                else:
-                    log.error("Loi Gemini (%s, attempt %d): %s", model_name, attempt + 1, e)
-                    if attempt < 2:
-                        await asyncio.sleep(3 * (attempt + 1))
+                    result = _parse_response(response.text)
+                    if result:
+                        log.info("Summarize OK voi model %s", model_name)
+                        return result
 
-    # Fallback khi tất cả model fail
-    log.error("TAT CA model Gemini fail, dung fallback")
+                except Exception as e:
+                    error_str = str(e)
+                    if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                        # Exponential backoff: 15s, 30s, 60s
+                        backoff = 15 * (2 ** attempt)
+                        log.warning("Model %s bi rate limit (attempt %d), cho %ds...",
+                                    model_name, attempt + 1, backoff)
+                        await asyncio.sleep(backoff)
+                        if attempt >= 1:
+                            break  # Chuyển sang model tiếp sau 2 lần thử
+                    elif "503" in error_str or "UNAVAILABLE" in error_str:
+                        log.warning("Model %s dang qua tai, doi 15s...", model_name)
+                        await asyncio.sleep(15)
+                        continue
+                    else:
+                        log.error("Loi Gemini (%s, attempt %d): %s", model_name, attempt + 1, e)
+                        if attempt < 2:
+                            await asyncio.sleep(3 * (attempt + 1))
+
+    # Fallback khi tất cả model fail sau 2 vòng
+    log.error("TAT CA model Gemini fail sau 2 vong, dung fallback")
     return {
         "summary": _smart_fallback(content),
         "tags": ["Khác"],
@@ -123,7 +135,7 @@ def _smart_fallback(content: str) -> str:
 
 
 def _parse_response(text: str) -> dict | None:
-    """Parse JSON từ response Gemini."""
+    """Parse JSON từ response Gemini, bao gồm xử lý JSON bị cắt cụt."""
     cleaned = text.strip()
     if cleaned.startswith("```"):
         lines = cleaned.split("\n")
@@ -132,11 +144,15 @@ def _parse_response(text: str) -> dict | None:
             if not line.strip().startswith("```")
         )
 
+    # Thử parse trực tiếp
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError:
-        log.warning("Khong parse duoc JSON: %s", text[:200])
-        return None
+        # Thử sửa JSON bị cắt cụt (thiếu đóng ngoặc)
+        data = _try_repair_json(cleaned)
+        if data is None:
+            log.warning("Khong parse duoc JSON: %s", text[:200])
+            return None
 
     summary = data.get("summary", "")
     tags = data.get("tags", [])
@@ -146,6 +162,52 @@ def _parse_response(text: str) -> dict | None:
         valid_tags = ["Khác"]
 
     return {"summary": summary, "tags": valid_tags}
+
+
+def _try_repair_json(text: str) -> dict | None:
+    """Thử sửa JSON bị cắt cụt từ Gemini (thiếu đóng ngoặc/quote)."""
+    cleaned = text.strip()
+
+    # Đảm bảo bắt đầu bằng {
+    if not cleaned.startswith("{"):
+        idx = cleaned.find("{")
+        if idx == -1:
+            return None
+        cleaned = cleaned[idx:]
+
+    # Thử thêm dần các ký tự đóng
+    repairs = [
+        '',           # nguyên bản
+        '"}',         # thiếu đóng quote + brace
+        '"]}'  ,      # thiếu đóng array + brace
+        '"}]}',       # thiếu nhiều
+        '"]}',        # thiếu đóng quote + array + brace
+        '}',          # chỉ thiếu brace
+    ]
+
+    for suffix in repairs:
+        try:
+            data = json.loads(cleaned + suffix)
+            if isinstance(data, dict) and "summary" in data:
+                log.info("Da sua JSON bi cat cut thanh cong")
+                return data
+        except json.JSONDecodeError:
+            continue
+
+    # Fallback: regex extract summary
+    import re
+    match = re.search(r'"summary"\s*:\s*"((?:[^"\\]|\\.)*)"', cleaned)
+    if match:
+        summary = match.group(1)
+        # Thử tìm tags
+        tags_match = re.search(r'"tags"\s*:\s*\[(.*?)\]', cleaned)
+        tags = []
+        if tags_match:
+            tags = [t.strip().strip('"') for t in tags_match.group(1).split(",")]
+        log.info("Da extract summary bang regex fallback")
+        return {"summary": summary, "tags": tags}
+
+    return None
 
 
 async def generate_rag_answer(question: str, context: str) -> str | None:

@@ -179,6 +179,64 @@ async def on_ready():
     log.info("Bot san sang! (batch mode: moi %sh)", config.DIGEST_INTERVAL_HOURS)
     log.info("=" * 50)
 
+    # Backfill: quét lại bài đăng bị lỡ khi bot offline
+    await _backfill_missed_posts()
+
+
+async def _backfill_missed_posts():
+    """Quét forum channel để thu thập bài đăng bị lỡ khi bot offline."""
+    if not _source_is_forum or _source_channel is None:
+        return
+
+    log.info("=== BACKFILL: Quet lai bai bi lo ===")
+    collected = 0
+
+    try:
+        # Lấy tất cả thread đang active + archived gần đây
+        threads = _source_channel.threads  # active threads
+
+        # Cũng lấy archived threads
+        archived = []
+        try:
+            async for thread in _source_channel.archived_threads(limit=50):
+                archived.append(thread)
+        except Exception as e:
+            log.warning("Khong lay duoc archived threads: %s", e)
+
+        all_threads = list(threads) + archived
+        log.info("Tim thay %d thread trong forum #%s", len(all_threads), _source_channel.name)
+
+        for thread in all_threads:
+            try:
+                # Lấy starter message
+                starter = None
+                try:
+                    starter = thread.starter_message
+                    if starter is None:
+                        starter = await thread.fetch_message(thread.id)
+                except Exception:
+                    try:
+                        async for msg in thread.history(limit=1, oldest_first=True):
+                            starter = msg
+                            break
+                    except Exception:
+                        continue
+
+                if starter and not starter.author.bot:
+                    # Kiểm tra chưa có trong DB
+                    if not await db.post_exists(str(starter.id)):
+                        post_id = await digest.collect_new_post(message=starter, db=db)
+                        if post_id is not None:
+                            collected += 1
+                            log.info("Backfill: collect bai #%d '%s'", post_id, thread.name[:50])
+            except Exception as e:
+                log.warning("Loi backfill thread '%s': %s", thread.name, e)
+
+    except Exception as e:
+        log.error("Loi backfill: %s", e, exc_info=True)
+
+    log.info("=== BACKFILL xong: %d bai moi ===", collected)
+
 
 async def _collect_post(message: discord.Message):
     """Thu thập bài mới vào DB (không xử lý AI ngay)."""

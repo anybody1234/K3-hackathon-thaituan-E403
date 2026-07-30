@@ -33,6 +33,7 @@ def create_digest_embed(
     author_name: str,
     jump_url: str,
     post_id: int,
+    title: str = "",
     original_content: str | None = None,
 ) -> discord.Embed:
     """
@@ -46,9 +47,10 @@ def create_digest_embed(
     color = TAG_COLORS.get(primary_tag, DEFAULT_COLOR)
 
     embed = discord.Embed(
+        title=title or None,
         description=summary,
         color=color,
-        url=jump_url,
+        url=jump_url if title else None,
     )
 
     # Tags dạng badge

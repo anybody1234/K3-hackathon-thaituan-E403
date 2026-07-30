@@ -5,6 +5,7 @@ Chế độ batch (5h/lần):
   1. Khi có bài mới → collect: lưu DB với digest_msg_id = NULL (chưa đăng)
   2. Theo chu kỳ → flush: lấy tất cả bài chưa đăng, tóm tắt + embed + đăng
 """
+import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 
@@ -118,10 +119,25 @@ async def flush_pending_digests(
     )
 
     posted = 0
-    for post in valid_posts:
+    for i, post in enumerate(valid_posts):
         try:
+            # Delay giữa các bài để tránh rate limit (trừ bài đầu)
+            if i > 0:
+                log.info("Cho 10s truoc bai tiep theo (tranh rate limit)...")
+                await asyncio.sleep(10)
+
             content_for_ai = post.get("fetched_content") or post.get("content") or ""
             author_name = post.get("author_name", "")
+
+            # Lấy tiêu đề thread (nếu là forum post)
+            post_title = ""
+            try:
+                channel_id = int(post.get("channel_id", 0))
+                thread = guild.get_channel_or_thread(channel_id)
+                if thread and hasattr(thread, "name"):
+                    post_title = thread.name
+            except Exception:
+                pass
 
             # Gọi Gemini: tóm tắt + tag
             result = await summarizer.summarize_and_tag(content_for_ai, author_name)
@@ -147,6 +163,7 @@ async def flush_pending_digests(
                 author_name=author_name,
                 jump_url=post.get("jump_url", ""),
                 post_id=post["id"],
+                title=post_title,
             )
             view = FeedbackView(post_id=post["id"])
             digest_msg = await digest_channel.send(embed=embed, view=view)
