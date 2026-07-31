@@ -1,8 +1,11 @@
 # Discord bot
 discord.py>=2.3.0
 
-# Google Gemini (new SDK)
+# Google Gemini (new SDK) — dùng cho embedding
 google-genai>=1.0.0
+
+# OpenRouter (OpenAI-compatible) — dùng cho summarize
+openai>=1.30.0
 
 # Async HTTP + HTML parsing (fetch link content)
 httpx>=0.27.0

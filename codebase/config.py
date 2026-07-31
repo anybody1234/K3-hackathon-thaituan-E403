@@ -16,10 +16,14 @@ DISCORD_BOT_TOKEN: str = os.getenv("DISCORD_BOT_TOKEN", "")
 SOURCE_CHANNEL_NAME: str = os.getenv("SOURCE_CHANNEL_NAME", "chia-sẻ")
 DIGEST_CHANNEL_NAME: str = os.getenv("DIGEST_CHANNEL_NAME", "tóm-tắt-chia-sẻ")
 
-# ── Google Gemini ────────────────────────────────────────
+# ── Google Gemini (dùng cho embedding) ───────────────────
 GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
 GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
+
+# ── OpenRouter (dùng cho summarize/RAG) ──────────────────
+OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "google/gemini-2.0-flash-001")
 
 # ── Tags & Roles ─────────────────────────────────────────
 ALLOWED_TAGS: list[str] = [

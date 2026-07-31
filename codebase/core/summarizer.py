@@ -1,29 +1,26 @@
 """
-Gọi Gemini API để tóm tắt bài đăng + gắn tag chủ đề.
+Gọi OpenRouter API (OpenAI-compatible) để tóm tắt bài đăng + gắn tag chủ đề.
 
-Có rate limiting (delay giữa các lần gọi) để tránh 429.
-Fallback qua nhiều model nếu một model hết quota.
+OpenRouter ưu điểm:
+- Không bị rate limit như Google API trực tiếp
+- Hỗ trợ nhiều model qua 1 endpoint
+- Tự động fallback nếu model chính bận
 """
 import json
 import logging
 import asyncio
 
-from google import genai
-from google.genai import types
+from openai import AsyncOpenAI
 
 import config
 
 log = logging.getLogger(__name__)
 
-# Khởi tạo client
-_client = genai.Client(api_key=config.GOOGLE_API_KEY)
-
-# Model ưu tiên — gemini-2.5-flash hoạt động tốt nhất, đặt đầu tiên
-_FALLBACK_MODELS = [
-    "gemini-2.5-flash",
-    config.GEMINI_MODEL,       # gemini-2.0-flash
-    "gemini-2.0-flash-lite",
-]
+# ── OpenRouter client ────────────────────────────────────
+_openrouter = AsyncOpenAI(
+    api_key=config.OPENROUTER_API_KEY,
+    base_url="https://openrouter.ai/api/v1",
+)
 
 # ── Prompt ───────────────────────────────────────────────
 
@@ -37,7 +34,7 @@ QUY TẮC:
 3. Gắn 1-3 tag từ danh sách: {', '.join(config.ALLOWED_TAGS)}
 4. Nếu nội dung quá ngắn/không rõ, summary = "Nội dung chưa đủ để tóm tắt", tags = ["Khác"].
 5. KHÔNG bịa thông tin.
-6. Trả về JSON thuần, không markdown.
+6. Trả về JSON thuần, không markdown, không code block.
 
 VÍ DỤ:
 {{"summary": "Chia sẻ 6 nguyên tắc AI có trách nhiệm của Google. Hữu ích cho ai đang xây sản phẩm AI.", "tags": ["AI"]}}
@@ -49,9 +46,9 @@ FORMAT:
 
 async def summarize_and_tag(content: str, author_name: str = "") -> dict:
     """
-    Tóm tắt nội dung + gắn tag.
+    Tóm tắt nội dung + gắn tag qua OpenRouter.
 
-    Chiến lược: thử model tốt nhất trước (gemini-2.5-flash), tối đa 3 lần.
+    Nhanh, đơn giản, không bị rate limit.
     """
     if not content or len(content.strip()) < 10:
         return {
@@ -61,55 +58,42 @@ async def summarize_and_tag(content: str, author_name: str = "") -> dict:
 
     user_prompt = f"Người đăng: {author_name}\n\nNội dung bài:\n{content[:3000]}"
 
-    max_attempts = 3
-    for attempt in range(max_attempts):
-        model_name = _FALLBACK_MODELS[attempt % len(_FALLBACK_MODELS)]
-
+    # Thử tối đa 2 lần
+    for attempt in range(2):
         try:
             if attempt > 0:
-                await asyncio.sleep(config.API_CALL_DELAY)
-
-            log.info("Goi %s (lan %d/%d)...", model_name, attempt + 1, max_attempts)
-
-            response = await asyncio.to_thread(
-                _client.models.generate_content,
-                model=model_name,
-                contents=user_prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=_SYSTEM_PROMPT,
-                    temperature=0.3,
-                    max_output_tokens=400,
-                ),
-            )
-
-            if not response.text:
-                log.warning("Gemini tra ve rong (%s)", model_name)
-                continue
-
-            result = _parse_response(response.text)
-            if result and len(result["summary"]) > 15:
-                # Chỉ chấp nhận summary đủ dài (tránh kết quả rác)
-                log.info("Summarize OK voi %s (lan %d): %s", model_name, attempt + 1, result["summary"][:60])
-                return result
-            else:
-                log.warning("Summary qua ngan hoac parse fail tu %s: %s",
-                           model_name, result.get("summary", "") if result else "None")
-
-        except Exception as e:
-            error_str = str(e)
-            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                wait = 30  # Chờ đủ 30s cho rate limit reset
-                log.warning("Model %s bi rate limit, cho %ds...", model_name, wait)
-                await asyncio.sleep(wait)
-            elif "503" in error_str or "UNAVAILABLE" in error_str:
-                log.warning("Model %s qua tai, cho 10s...", model_name)
-                await asyncio.sleep(10)
-            else:
-                log.error("Loi Gemini (%s): %s", model_name, e)
                 await asyncio.sleep(3)
 
+            log.info("Goi OpenRouter %s (lan %d)...", config.OPENROUTER_MODEL, attempt + 1)
+
+            response = await _openrouter.chat.completions.create(
+                model=config.OPENROUTER_MODEL,
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.3,
+                max_tokens=400,
+            )
+
+            text = response.choices[0].message.content
+            if not text:
+                log.warning("OpenRouter tra ve rong")
+                continue
+
+            result = _parse_response(text)
+            if result and len(result["summary"]) > 15:
+                log.info("Summarize OK: %s | %s", result["summary"][:60], result["tags"])
+                return result
+            else:
+                log.warning("Summary qua ngan hoac parse fail: %s",
+                           result.get("summary", "") if result else "None")
+
+        except Exception as e:
+            log.error("Loi OpenRouter (lan %d): %s", attempt + 1, e)
+
     # Fallback
-    log.error("Gemini fail sau %d lan thu, dung fallback", max_attempts)
+    log.error("OpenRouter fail, dung fallback")
     return {
         "summary": _smart_fallback(content),
         "tags": ["Khác"],
@@ -117,11 +101,9 @@ async def summarize_and_tag(content: str, author_name: str = "") -> dict:
 
 
 def _smart_fallback(content: str) -> str:
-    """Fallback tóm tắt khi Gemini fail — lấy câu đầu + cắt gọn."""
-    # Tách câu
+    """Fallback tóm tắt khi API fail — lấy câu đầu + cắt gọn."""
     sentences = [s.strip() for s in content.replace("\n", ". ").split(".") if s.strip() and len(s.strip()) > 10]
     if sentences:
-        # Lấy 2 câu đầu có ý nghĩa
         summary = ". ".join(sentences[:2])
         if len(summary) > 250:
             summary = summary[:250] + "..."
@@ -130,8 +112,10 @@ def _smart_fallback(content: str) -> str:
 
 
 def _parse_response(text: str) -> dict | None:
-    """Parse JSON từ response Gemini, bao gồm xử lý JSON bị cắt cụt."""
+    """Parse JSON từ response, bao gồm xử lý JSON bị cắt cụt."""
     cleaned = text.strip()
+
+    # Bỏ code block nếu có
     if cleaned.startswith("```"):
         lines = cleaned.split("\n")
         cleaned = "\n".join(
@@ -143,7 +127,6 @@ def _parse_response(text: str) -> dict | None:
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError:
-        # Thử sửa JSON bị cắt cụt (thiếu đóng ngoặc)
         data = _try_repair_json(cleaned)
         if data is None:
             log.warning("Khong parse duoc JSON: %s", text[:200])
@@ -160,27 +143,20 @@ def _parse_response(text: str) -> dict | None:
 
 
 def _try_repair_json(text: str) -> dict | None:
-    """Thử sửa JSON bị cắt cụt từ Gemini (thiếu đóng ngoặc/quote)."""
+    """Thử sửa JSON bị cắt cụt (thiếu đóng ngoặc/quote)."""
+    import re
+
     cleaned = text.strip()
 
-    # Đảm bảo bắt đầu bằng {
+    # Tìm JSON bắt đầu
     if not cleaned.startswith("{"):
         idx = cleaned.find("{")
         if idx == -1:
             return None
         cleaned = cleaned[idx:]
 
-    # Thử thêm dần các ký tự đóng
-    repairs = [
-        '',           # nguyên bản
-        '"}',         # thiếu đóng quote + brace
-        '"]}'  ,      # thiếu đóng array + brace
-        '"}]}',       # thiếu nhiều
-        '"]}',        # thiếu đóng quote + array + brace
-        '}',          # chỉ thiếu brace
-    ]
-
-    for suffix in repairs:
+    # Thử thêm ký tự đóng
+    for suffix in ['', '"}', '"]}', '"}]}', '"]}', '}']:
         try:
             data = json.loads(cleaned + suffix)
             if isinstance(data, dict) and "summary" in data:
@@ -189,12 +165,10 @@ def _try_repair_json(text: str) -> dict | None:
         except json.JSONDecodeError:
             continue
 
-    # Fallback: regex extract summary
-    import re
+    # Regex fallback
     match = re.search(r'"summary"\s*:\s*"((?:[^"\\]|\\.)*)"', cleaned)
     if match:
         summary = match.group(1)
-        # Thử tìm tags
         tags_match = re.search(r'"tags"\s*:\s*\[(.*?)\]', cleaned)
         tags = []
         if tags_match:
@@ -206,7 +180,7 @@ def _try_repair_json(text: str) -> dict | None:
 
 
 async def generate_rag_answer(question: str, context: str) -> str | None:
-    """Gọi Gemini để tổng hợp câu trả lời RAG."""
+    """Gọi OpenRouter để tổng hợp câu trả lời RAG."""
     prompt = f"""\
 Dựa trên các bài chia sẻ sau đây, hãy trả lời câu hỏi của người dùng.
 Trả lời ngắn gọn (3-5 câu), bằng tiếng Việt, có trích dẫn [Bài N].
@@ -218,22 +192,19 @@ CÂU HỎI: {question}
 
 TRẢ LỜI:"""
 
-    for model_name in _FALLBACK_MODELS:
-        try:
-            await asyncio.sleep(config.API_CALL_DELAY)
-            response = await asyncio.to_thread(
-                _client.models.generate_content,
-                model=model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.4,
-                    max_output_tokens=512,
-                ),
-            )
-            if response.text:
-                return response.text
-        except Exception as e:
-            log.warning("RAG voi %s fail: %s", model_name, e)
-            continue
+    try:
+        response = await _openrouter.chat.completions.create(
+            model=config.OPENROUTER_MODEL,
+            messages=[
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.4,
+            max_tokens=512,
+        )
+        text = response.choices[0].message.content
+        if text:
+            return text
+    except Exception as e:
+        log.warning("RAG fail: %s", e)
 
     return None
