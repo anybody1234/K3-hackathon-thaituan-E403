@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 WEIGHT_TAG_MATCH = 0.5
 WEIGHT_RECENCY = 0.3
 WEIGHT_POPULARITY = 0.2
+FORYOU_LIMIT = 3  # Chỉ hiển thị 3 bài gợi ý
 
 
 def setup_foryou_command(tree: app_commands.CommandTree, db: Database):
@@ -42,10 +43,23 @@ def setup_foryou_command(tree: app_commands.CommandTree, db: Database):
             profile = await db.get_user_profile(user_id)
 
             # ② Lấy bài gần đây
-            posts = await db.get_recent_posts(limit=50)
+            posts = await db.get_recent_posts(limit=20)
             if not posts:
                 await interaction.followup.send(
                     "📭 Chưa có bài nào. Hãy chia sẻ bài đầu tiên!",
+                    ephemeral=True,
+                )
+                return
+
+            # ② b. Lọc bỏ bài user đã skip
+            skipped_ids = await db.get_user_skipped_post_ids(user_id)
+            if skipped_ids:
+                posts = [p for p in posts if p["id"] not in skipped_ids]
+                log.info("Loai %d bai da skip cho user %s", len(skipped_ids), user_id)
+
+            if not posts:
+                await interaction.followup.send(
+                    "📭 Bạn đã bỏ qua hết bài rồi! Hãy chờ bài mới.",
                     ephemeral=True,
                 )
                 return
@@ -55,7 +69,7 @@ def setup_foryou_command(tree: app_commands.CommandTree, db: Database):
                 ranked = _rank_posts(posts, profile)
             else:
                 # Cold start: chưa có profile → trả bài mới nhất
-                ranked = posts[:config.TOP_K_RESULTS]
+                ranked = posts[:FORYOU_LIMIT]
                 log.info("User %s chưa có profile, dùng fallback mới nhất", user_id)
 
             if not ranked:
@@ -66,12 +80,12 @@ def setup_foryou_command(tree: app_commands.CommandTree, db: Database):
                 return
 
             # ④ Tạo embed
-            embed = create_foryou_embed(ranked[:config.TOP_K_RESULTS], user_name)
+            embed = create_foryou_embed(ranked[:FORYOU_LIMIT], user_name)
 
             await interaction.followup.send(embed=embed, ephemeral=True)
             log.info(
                 "/foryou cho %s: %d bài, profile %d tags",
-                user_name, len(ranked[:config.TOP_K_RESULTS]), len(profile),
+                user_name, len(ranked[:FORYOU_LIMIT]), len(profile),
             )
 
         except Exception as e:

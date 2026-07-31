@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS posts (
     channel_id      TEXT NOT NULL,
     author_id       TEXT NOT NULL,
     author_name     TEXT,
+    title           TEXT,           -- Tiêu đề thread forum
     content         TEXT,
     fetched_content TEXT,
     summary         TEXT,
@@ -68,6 +69,11 @@ class Database:
         self._conn = await aiosqlite.connect(str(self.db_path))
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(_SCHEMA)
+        # Migration: thêm cột title nếu DB cũ chưa có
+        try:
+            await self._conn.execute("ALTER TABLE posts ADD COLUMN title TEXT")
+        except Exception:
+            pass  # Đã có rồi
         await self._conn.commit()
 
     async def close(self):
@@ -97,20 +103,22 @@ class Database:
         embedding: np.ndarray | None,
         jump_url: str,
         created_at: datetime,
+        title: str = "",
     ) -> int:
         """Lưu bài mới, trả về post ID. summary có thể None (batch mode)."""
         emb_blob = pickle.dumps(embedding) if embedding is not None else None
         async with self._conn.execute(
             """INSERT INTO posts
-               (discord_msg_id, channel_id, author_id, author_name,
+               (discord_msg_id, channel_id, author_id, author_name, title,
                 content, fetched_content, summary, tags, embedding,
                 jump_url, created_at, processed_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 discord_msg_id,
                 channel_id,
                 author_id,
                 author_name,
+                title,
                 content,
                 fetched_content,
                 summary,
@@ -192,10 +200,11 @@ class Database:
         return results
 
     async def get_recent_posts(self, limit: int = 50) -> list[dict]:
-        """Lấy bài gần nhất."""
+        """Lấy bài gần nhất (chỉ bài đã xử lý AI)."""
         async with self._conn.execute(
-            "SELECT id, summary, tags, jump_url, author_name, created_at "
-            "FROM posts ORDER BY created_at DESC LIMIT ?",
+            "SELECT id, title, content, summary, tags, jump_url, author_name, created_at "
+            "FROM posts WHERE summary IS NOT NULL "
+            "ORDER BY created_at DESC LIMIT ?",
             (limit,),
         ) as cur:
             rows = await cur.fetchall()
@@ -236,6 +245,15 @@ class Database:
         ) as cur:
             rows = await cur.fetchall()
         return {row["reaction_type"]: row["cnt"] for row in rows}
+
+    async def get_user_skipped_post_ids(self, user_id: str) -> set[int]:
+        """Lấy danh sách post_id mà user đã bấm 'Bỏ qua'."""
+        async with self._conn.execute(
+            "SELECT post_id FROM reactions WHERE user_id = ? AND reaction_type = 'skip'",
+            (user_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return {row["post_id"] for row in rows}
 
     # ── User Profiles ────────────────────────────────────
 

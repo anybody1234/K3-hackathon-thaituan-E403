@@ -49,12 +49,19 @@ async def collect_new_post(
     if urls:
         fetched = await link_fetcher.fetch_content_for_message(content)
 
+    # Lấy tiêu đề thread (forum post)
+    title = ""
+    channel = message.channel
+    if hasattr(channel, "name"):
+        title = channel.name  # Thread name = tiêu đề forum post
+
     # Lưu vào DB — chưa có summary/tags/embedding (sẽ xử lý lúc flush)
     post_id = await db.save_post(
         discord_msg_id=msg_id,
         channel_id=str(message.channel.id),
         author_id=str(message.author.id),
         author_name=author_name,
+        title=title,
         content=content,
         fetched_content=fetched,
         summary=None,    # Chưa tóm tắt
@@ -120,7 +127,7 @@ async def flush_pending_digests(
     # Header message cho batch
     count = len(valid_posts)
     header = await digest_channel.send(
-        f"📋 **Tổng hợp {count} bài chia sẻ mới** (cập nhật mỗi {int(config.DIGEST_INTERVAL_HOURS)}h)\n"
+        f"📋 **Tổng hợp bài chia sẻ mới** (cập nhật mỗi {int(config.DIGEST_INTERVAL_HOURS)}h)\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
 

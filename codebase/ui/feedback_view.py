@@ -91,6 +91,44 @@ def _build_updated_view(existing_reactions: set[str], new_reaction: str) -> View
     return view
 
 
+def _status_text(reactions: set[str]) -> str:
+    """Tạo text trạng thái cho user đã react."""
+    parts = []
+    if "like" in reactions:
+        parts.append("👍 Hay")
+    if "save" in reactions:
+        parts.append("📌 Lưu")
+    if "skip" in reactions:
+        parts.append("⏭️ Bỏ qua")
+    return f"Bạn đã chọn: {', '.join(parts)}"
+
+
+def _build_personal_view(reactions: set[str]) -> View:
+    """
+    Tạo view ephemeral cho riêng user — hiện trạng thái buttons mờ.
+    View này chỉ gửi kèm ephemeral message, KHÔNG ảnh hưởng message gốc.
+    """
+    view = View(timeout=None)
+
+    buttons_config = [
+        ("Hay", "👍", discord.ButtonStyle.success, "like"),
+        ("Lưu", "📌", discord.ButtonStyle.primary, "save"),
+        ("Bỏ qua", "⏭️", discord.ButtonStyle.secondary, "skip"),
+    ]
+
+    for label, emoji, style, action in buttons_config:
+        btn = Button(
+            label=f"✓ {label}" if action in reactions else label,
+            emoji=emoji,
+            style=discord.ButtonStyle.success if action in reactions else style,
+            disabled=True,  # Tất cả mờ trong ephemeral view
+            custom_id=f"personal:{action}",
+        )
+        view.add_item(btn)
+
+    return view
+
+
 async def _handle_reaction(
     interaction: discord.Interaction, reaction_type: str
 ):
@@ -117,6 +155,13 @@ async def _handle_reaction(
         # Lấy reactions hiện tại của user cho post này
         existing = await _get_user_reactions_for_post(user_id, post_id)
 
+        # Đã bấm rồi → bỏ qua im lặng (không spam)
+        if reaction_type in existing:
+            await interaction.followup.send(
+                _status_text(existing), ephemeral=True
+            )
+            return
+
         # Kiểm tra logic tương thích
         if reaction_type == "skip" and ("like" in existing or "save" in existing):
             await interaction.followup.send(
@@ -127,12 +172,6 @@ async def _handle_reaction(
         if reaction_type in ("like", "save") and "skip" in existing:
             await interaction.followup.send(
                 "Bạn đã bỏ qua bài này rồi.", ephemeral=True
-            )
-            return
-
-        if reaction_type in existing:
-            await interaction.followup.send(
-                "Bạn đã thực hiện hành động này rồi.", ephemeral=True
             )
             return
 
@@ -151,12 +190,8 @@ async def _handle_reaction(
             for tag in tags:
                 await _db.update_user_profile(user_id, tag, delta)
 
-        # Cập nhật buttons trên message
+        # Phản hồi ephemeral ngắn gọn (chỉ user này thấy, không kèm buttons)
         new_existing = existing | {reaction_type}
-        new_view = _build_updated_view(existing, reaction_type)
-        await interaction.message.edit(view=new_view)
-
-        # Phản hồi ephemeral
         messages = {
             "like": "👍 Đã ghi nhận — bạn thấy bài này hay!",
             "save": "📌 Đã lưu — sẽ ưu tiên nội dung tương tự cho bạn.",

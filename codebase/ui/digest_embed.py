@@ -88,16 +88,27 @@ def create_foryou_embed(
 
     for i, post in enumerate(posts, 1):
         tags_str = ", ".join(f"`{t}`" for t in post.get("tags", []))
-        summary = post.get("summary", "Không có tóm tắt")
+        summary = post.get("summary") or "Không có tóm tắt"
         jump_url = post.get("jump_url", "")
         author = post.get("author_name", "Ẩn danh")
+
+        # Lấy tiêu đề: ưu tiên title (thread name), fallback dòng đầu content
+        title = post.get("title", "")
+        if not title:
+            content = post.get("content", "")
+            first_line = content.split("\n")[0].strip() if content else ""
+            title = first_line[:60] if first_line else "Bài chia sẻ"
+            if len(first_line) > 60:
+                title += "…"
+        if not title:
+            title = "Bài chia sẻ"
 
         value = f"{summary}\n{tags_str} • bởi {author}"
         if jump_url:
             value += f" • [xem]({jump_url})"
 
         embed.add_field(
-            name=f"{i}. Bài chia sẻ",
+            name=f"{i}. {title}",
             value=value,
             inline=False,
         )
