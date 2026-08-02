@@ -1,6 +1,6 @@
 # Kết quả chạy thử — Discord AI Agent
 
-**Ngày chạy:** 2026-07-31 09:07:20
+**Ngày chạy:** 2026-07-31 00:26:17
 
 ## Tổng kết: 30/30
 
@@ -39,7 +39,7 @@
 | 24 | T24 | Parse text không phải JSON trả None | ✅ PASS | result=None |
 | 25 | T25 | Smart fallback tạo tóm tắt khi AI fail | ✅ PASS | fallback=[AI tạm nghỉ] Đây là câu đầu tiên khá dài để test. Và đây là câu thứ hai cũng khá dài |
 | 26 | T26 | Xử lý nội dung rỗng trả mặc định | ✅ PASS | result={'summary': 'Nội dung chưa đủ để tóm tắt.', 'tags': ['Khác']} |
-| 27 | T27 | Tóm tắt nội dung thực (API hoặc fallback) | ✅ PASS | summary=Bài viết hướng dẫn cơ bản về Docker, từ cài đặt đến tạo và chạy container. Docker giúp đóng gói ứng  |
+| 27 | T27 | Tóm tắt nội dung thực (API hoặc fallback) | ✅ PASS | summary=[AI tạm nghỉ] Hướng dẫn sử dụng Docker cho người mới bắt đầu. Docker là một nền tảng container hóa g |
 | 28 | T28 | Lọc tag không hợp lệ, chỉ giữ tag trong ALLOWED_TAGS | ✅ PASS | tags=['AI'] |
 | 29 | T29 | Pipeline: save bài pending → đọc pending list | ✅ PASS | pending=1 |
 | 30 | T30 | Pipeline: update AI → search posts with embeddings | ✅ PASS | found=1 |
